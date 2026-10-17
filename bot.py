@@ -3,29 +3,34 @@ import json
 import requests
 from datetime import datetime
 import pytz
+from bs4 import BeautifulSoup
 
-# GitHub Secrets üzerinden okunur
+# ================= AYARLAR & ORTAM DEĞİŞKENLERİ =================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+AMAZON_AFFILIATE_TAG = os.environ.get("AMAZON_AFFILIATE_TAG", "oyunfirsat-21")
 DATABASE_FILE = "gonderilen_oyunlar.json"
 
-# --- HAFIZA YÖNETİMİ ---
+# ================= HAFIZA YÖNETİMİ =================
 def load_sent_games():
+    """Daha önce gönderilmiş içeriklerin anahtarlarını yükler."""
     if os.path.exists(DATABASE_FILE):
         try:
             with open(DATABASE_FILE, "r", encoding="utf-8") as f:
                 return set(json.load(f))
-        except Exception:
+        except Exception as e:
+            print(f"Hafıza dosyası okunamadı: {e}")
             return set()
     return set()
 
-def save_sent_game(game_url, sent_games_set):
-    sent_games_set.add(game_url)
+def save_sent_game(item_key, sent_games_set):
+    """Yeni paylaşılan içeriğin anahtarını hafıza dosyasına işler."""
+    sent_games_set.add(item_key)
     with open(DATABASE_FILE, "w", encoding="utf-8") as f:
         json.dump(list(sent_games_set), f, ensure_ascii=False, indent=2)
 
 def format_date_tr(utc_date_str):
-    """UTC ISO tarihini Türkiye saatine (UTC+3) ve okunabilir Türkçe formata çevirir."""
+    """UTC zaman damgasını Türkiye saatine (UTC+3) ve Türkçe formata çevirir."""
     if not utc_date_str:
         return "Süreli / Belirtilmemiş"
     try:
@@ -43,7 +48,7 @@ def format_date_tr(utc_date_str):
     except Exception:
         return "Belirtilmemiş"
 
-# --- PLATFORM TARAYICILARI ---
+# ================= PLATFORM TARAYICILARI =================
 
 # 1. EPIC GAMES
 def get_epic_free_games():
@@ -52,7 +57,8 @@ def get_epic_free_games():
     try:
         res = requests.get(url, params=params, timeout=10).json()
         games = res['data']['Catalog']['searchStore']['elements']
-    except Exception:
+    except Exception as e:
+        print(f"Epic Games verisi çekilemedi: {e}")
         return []
 
     free_games = []
@@ -101,6 +107,7 @@ def get_epic_free_games():
 # 2. STEAM
 def get_steam_free_games():
     steam_free = []
+    # Featured Specials API Kontrolü
     try:
         url = "https://store.steampowered.com/api/featuredcategories"
         res = requests.get(url, params={"l": "turkish", "cc": "tr"}, timeout=10).json()
@@ -112,51 +119,80 @@ def get_steam_free_games():
                     "platform": "STEAM",
                     "title": item.get('name'),
                     "genre": "PC Oyunu",
-                    "end_date": "Sınırlı Süre (Stok/Kampanya Bitene Kadar)",
+                    "end_date": "Sınırlı Süre (Kampanya Bitene Kadar)",
                     "original_price": f"${orig_price:.2f}" if orig_price > 0 else "Belirtilmemiş",
                     "image_url": item.get('header_image') or f"https://cdn.akamai.steamstatic.com/steam/apps/{app_id}/header.jpg",
                     "url": f"https://store.steampowered.com/app/{app_id}/"
                 })
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Steam featured verisi çekilemedi: {e}")
+
+    # Arama Motoru Kontrolü
+    try:
+        search_url = "https://store.steampowered.com/search/results/"
+        search_params = {
+            "query": "",
+            "start": 0,
+            "count": 25,
+            "maxprice": "free",
+            "specials": 1,
+            "json": 1,
+            "l": "turkish",
+            "cc": "tr"
+        }
+        search_res = requests.get(search_url, params=search_params, timeout=10).json()
+        items = search_res.get('items', [])
+        
+        for it in items:
+            app_id = it.get('id')
+            url = f"https://store.steampowered.com/app/{app_id}/"
+            if not any(g['url'] == url for g in steam_free):
+                steam_free.append({
+                    "platform": "STEAM",
+                    "title": it.get('name'),
+                    "genre": "PC Oyunu",
+                    "end_date": "Sınırlı Süre (Kampanya Bitene Kadar)",
+                    "original_price": "İndirimde",
+                    "image_url": it.get('tiny_image', '').replace("capsule_sm_120", "header"),
+                    "url": url
+                })
+    except Exception as e:
+        print(f"Steam arama verisi çekilemedi: {e}")
+
     return steam_free
 
 # 3. AMAZON PRIME GAMING
 def get_prime_gaming_free_games():
-    """Prime Gaming açık katalog beslemesini tarayarak ücretsiz 'Free with Prime' oyunlarını çeker."""
     prime_games = []
-    # Prime Gaming web istemcisinin katalog verisini sunduğu açık CDN endpoint'i
+    
+    # 1. Hat: Resmi CDN endpoint'i
     url = "https://gaming.amazon.com/api/offers"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8"
     }
-    
     try:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
             data = res.json()
             offers = data.get("offers", []) or data.get("items", [])
             for item in offers:
-                # Sadece oyun içi eşya (DLC) değil, tam oyun (FGWP - Free Games with Prime) olanlar
                 item_type = item.get("category", "") or item.get("type", "")
-                is_game = "game" in item_type.lower() or item.get("isFullGame", False)
-                
-                if is_game:
-                    title = item.get("title") or item.get("name")
-                    end_raw = item.get("endTime") or item.get("expiresAt")
-                    
+                if "game" in item_type.lower() or item.get("isFullGame", False):
                     prime_games.append({
                         "platform": "PRIME GAMING",
-                        "title": title,
+                        "title": item.get("title") or item.get("name"),
                         "genre": "Prime Hediyesi (Tam Oyun)",
-                        "end_date": format_date_tr(end_raw),
+                        "end_date": format_date_tr(item.get("endTime") or item.get("expiresAt")),
                         "original_price": "Prime İle Ücretsiz",
                         "image_url": item.get("media", {}).get("featuredImage") or item.get("imageUrl", ""),
-                        "url": f"https://gaming.amazon.com/home"
+                        "url": "https://gaming.amazon.com/home"
                     })
     except Exception:
-        # Alternatif: GamerPower Prime API beslemesi üzerinden doğrudan çekme
+        pass
+
+    # 2. Hat: GamerPower Prime API (Yedek hat)
+    if not prime_games:
         try:
             alt_url = "https://www.gamerpower.com/api/giveaways?platform=amazon"
             alt_res = requests.get(alt_url, timeout=10).json()
@@ -176,7 +212,65 @@ def get_prime_gaming_free_games():
 
     return prime_games
 
-# --- TELEGRAM GÖNDERİCİ ---
+# 4. AMAZON TR OYUNCU EKİPMANLARI AFFILIATE TARAYICISI
+def get_amazon_gaming_deals():
+    url = "https://www.amazon.com.tr/s?k=oyuncu+kulakl%C4%B1k+mouse&rh=p_n_deal_type%3A26901166031"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept-Language": "tr-TR,tr;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+    }
+
+    try:
+        res = requests.get(url, headers=headers, timeout=15)
+        if res.status_code != 200:
+            return []
+    except Exception as e:
+        print(f"Amazon fırsatları çekilemedi: {e}")
+        return []
+
+    soup = BeautifulSoup(res.text, "html.parser")
+    products = []
+
+    cards = soup.select("div[data-asin]")
+    for card in cards:
+        asin = card.get("data-asin", "").strip()
+        if not asin:
+            continue
+
+        title_el = card.select_one("h2 span")
+        if not title_el:
+            continue
+        title = title_el.text.strip()
+
+        price_whole = card.select_one(".a-price-whole")
+        price_fraction = card.select_one(".a-price-fraction")
+        if not price_whole:
+            continue
+        
+        current_price = f"{price_whole.text.strip()},{price_fraction.text.strip() if price_fraction else '00'} TL"
+        
+        strike_price = card.select_one("span.a-price.a-text-price span.a-offscreen")
+        original_price = strike_price.text.strip() if strike_price else "İndirimde"
+
+        img_el = card.select_one("img.s-image")
+        image_url = img_el.get("src", "") if img_el else ""
+
+        clean_url = f"https://www.amazon.com.tr/dp/{asin}/?tag={AMAZON_AFFILIATE_TAG}"
+
+        products.append({
+            "platform": "AMAZON TR FIRSATI",
+            "title": title[:75] + ("..." if len(title) > 75 else ""),
+            "original_price": original_price,
+            "current_price": current_price,
+            "image_url": image_url,
+            "url": clean_url
+        })
+
+    return products
+
+# ================= TELEGRAM GÖNDERİCİLERİ =================
+
 def send_telegram_alert(game):
     genre_clean = game['genre'].split('/')[0].strip().replace(" ", "").replace("-", "") if game.get('genre') else "Oyun"
     genre_tag = f"#{genre_clean}"
@@ -211,14 +305,52 @@ def send_telegram_alert(game):
     res = requests.post(endpoint, json=payload)
     return res.status_code == 200
 
-# --- ANA DÖNGÜ ---
-sent_games = load_sent_games()
-all_games = get_epic_free_games() + get_steam_free_games() + get_prime_gaming_free_games()
+def send_deal_alert(deal):
+    caption = (
+        f"🔥 *GÜNÜN OYUNCU EKİPMANI İNDİRİMİ!*\n\n"
+        f"🎧 *Ürün:* {deal['title']}\n"
+        f"💰 *Eski Fiyat:* ~{deal['original_price']}~\n"
+        f"🏷 *İndirimli Fiyat:* {deal['current_price']}\n\n"
+        f"🛒 [Amazon'da İncele / Satın Al]({deal['url']})\n\n"
+        f"#AmazonFırsatları #OyuncuEkipmanları #İndirim #GamingSetup"
+    )
 
-for game in all_games:
-    # URL veya oyun başlığı kontrolü (Prime linkleri genel olduğu için başlıkla birleştirilir)
-    unique_key = game['title'] + "_" + game['url']
-    if unique_key not in sent_games:
-        if send_telegram_alert(game):
-            save_sent_game(unique_key, sent_games)
-            print(f"Paylaşıldı: [{game['platform']}] {game['title']}")
+    endpoint = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/" + ("sendPhoto" if deal['image_url'] else "sendMessage")
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "caption" if deal['image_url'] else "text": caption,
+        "parse_mode": "Markdown"
+    }
+    if deal['image_url']:
+        payload["photo"] = deal['image_url']
+
+    res = requests.post(endpoint, json=payload)
+    return res.status_code == 200
+
+# ================= ANA YÜRÜTME DÖNGÜSÜ =================
+if __name__ == "__main__":
+    sent_games = load_sent_games()
+    print(f"Hafızada kayıtlı içerik sayısı: {len(sent_games)}")
+
+    # 1. Ücretsiz Oyunları Tara ve Gönder
+    all_games = get_epic_free_games() + get_steam_free_games() + get_prime_gaming_free_games()
+    print(f"Toplam bulunan ücretsiz oyun adedi: {len(all_games)}")
+    
+    for game in all_games:
+        unique_key = game['title'] + "_" + game['url']
+        if unique_key not in sent_games:
+            if send_telegram_alert(game):
+                save_sent_game(unique_key, sent_games)
+                print(f"Paylaşıldı: [{game['platform']}] {game['title']}")
+
+    # 2. İndirimli Ekipman Fırsatını Tara ve Gönder (Her çalıştırmada maksimum 1 adet)
+    deals = get_amazon_gaming_deals()
+    print(f"Toplam bulunan indirimli donanım adedi: {len(deals)}")
+    
+    for deal in deals:
+        deal_key = "DEAL_" + deal['url']
+        if deal_key not in sent_games:
+            if send_deal_alert(deal):
+                save_sent_game(deal_key, sent_games)
+                print(f"Paylaşıldı: [{deal['platform']}] {deal['title']}")
+                break  # Kanalı boğmamak için tur başına tek fırsat
