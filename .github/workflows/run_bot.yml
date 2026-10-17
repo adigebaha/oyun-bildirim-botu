@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   check-games:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Repoyu Klonla
         uses: actions/checkout@v4
