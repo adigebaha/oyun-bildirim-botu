@@ -1,0 +1,39 @@
+name: Ucretsiz Oyun Kontrolculeri
+
+on:
+  schedule:
+    # Her 6 saatte bir otomatik calisir (00:00, 06:00, 12:00, 18:00 UTC)
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # İstediginizde tek tikla manuel calistirma butonu ekler
+
+permissions:
+  contents: write # gonderilen_oyunlar.json dosyasini repoya geri yazabilmesi icin
+
+jobs:
+  check-games:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repoyu Klonla
+        uses: actions/checkout@v4
+
+      - name: Python Kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Bagimliliklari Yukle
+        run: pip install -r requirements.txt
+
+      - name: Botu Calistir
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bot.py
+
+      - name: Guncel Oyun Listesini Kaydet (Commit & Push)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add gonderilen_oyunlar.json
+          git commit -m "Hafiza guncellendi [skip ci]" || exit 0
+          git push
