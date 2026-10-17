@@ -4,6 +4,7 @@ import requests
 from datetime import datetime
 import pytz
 from bs4 import BeautifulSoup
+from urllib.parse import quote
 
 # ================= AYARLAR & ORTAM DEĞİŞKENLERİ =================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -107,7 +108,6 @@ def get_epic_free_games():
 # 2. STEAM
 def get_steam_free_games():
     steam_free = []
-    # Featured Specials API Kontrolü
     try:
         url = "https://store.steampowered.com/api/featuredcategories"
         res = requests.get(url, params={"l": "turkish", "cc": "tr"}, timeout=10).json()
@@ -127,7 +127,6 @@ def get_steam_free_games():
     except Exception as e:
         print(f"Steam featured verisi çekilemedi: {e}")
 
-    # Arama Motoru Kontrolü
     try:
         search_url = "https://store.steampowered.com/search/results/"
         search_params = {
@@ -271,16 +270,26 @@ def get_amazon_gaming_deals():
 
 # ================= TELEGRAM GÖNDERİCİLERİ =================
 
+def build_share_url(title):
+    """Telegram'ın yerel paylaşım arayüzünü açan bağlantıyı üretir."""
+    channel_clean = (TELEGRAM_CHAT_ID or "").lstrip("@")
+    channel_target = f"https://t.me/{channel_clean}" if channel_clean else "https://t.me"
+    share_msg = f"🔥 {title} fırsatını gördün mü? Kaçırma derim:"
+    return f"https://t.me/share/url?url={quote(channel_target)}&text={quote(share_msg)}"
+
 def send_telegram_alert(game):
     genre_clean = game['genre'].split('/')[0].strip().replace(" ", "").replace("-", "") if game.get('genre') else "Oyun"
     genre_tag = f"#{genre_clean}"
     
     if "EPIC" in game['platform']:
         platform_tag = "#EpicGames"
+        btn_text = "🎮 Epic Games'ten Ücretsiz Al"
     elif "STEAM" in game['platform']:
         platform_tag = "#Steam"
+        btn_text = "🎮 Steam Kütüphanene Ekle"
     else:
         platform_tag = "#PrimeGaming #AmazonPrime"
+        btn_text = "🎁 Prime Gaming'den Talep Et"
     
     caption = (
         f"🎮 *{game['platform']} ÜCRETSİZ OLDU!*\n\n"
@@ -289,15 +298,28 @@ def send_telegram_alert(game):
         f"💰 *Eski Fiyat:* ~{game['original_price']}~\n"
         f"🎁 *Şu Anki Fiyat:* ÜCRETSİZ\n"
         f"⏳ *Son Geçerlilik:* {game['end_date']}\n\n"
-        f"🔗 [Kütüphanene Ekle / Talep Et]({game['url']})\n\n"
         f"{platform_tag} #UcretsizOyun #BedavaOyun #Gamer {genre_tag}"
     )
+
+    share_url = build_share_url(game['title'])
+
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": btn_text, "url": game['url']}
+            ],
+            [
+                {"text": "👥 Arkadaşınla Paylaş", "url": share_url}
+            ]
+        ]
+    }
     
     endpoint = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/" + ("sendPhoto" if game['image_url'] else "sendMessage")
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "caption" if game['image_url'] else "text": caption,
-        "parse_mode": "Markdown"
+        "parse_mode": "Markdown",
+        "reply_markup": reply_markup
     }
     if game['image_url']:
         payload["photo"] = game['image_url']
@@ -311,15 +333,28 @@ def send_deal_alert(deal):
         f"🎧 *Ürün:* {deal['title']}\n"
         f"💰 *Eski Fiyat:* ~{deal['original_price']}~\n"
         f"🏷 *İndirimli Fiyat:* {deal['current_price']}\n\n"
-        f"🛒 [Amazon'da İncele / Satın Al]({deal['url']})\n\n"
         f"#AmazonFırsatları #OyuncuEkipmanları #İndirim #GamingSetup"
     )
+
+    share_url = build_share_url(deal['title'])
+
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "🛒 Amazon'da İncele & Satın Al", "url": deal['url']}
+            ],
+            [
+                {"text": "👥 Arkadaşınla Paylaş", "url": share_url}
+            ]
+        ]
+    }
 
     endpoint = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/" + ("sendPhoto" if deal['image_url'] else "sendMessage")
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "caption" if deal['image_url'] else "text": caption,
-        "parse_mode": "Markdown"
+        "parse_mode": "Markdown",
+        "reply_markup": reply_markup
     }
     if deal['image_url']:
         payload["photo"] = deal['image_url']
@@ -353,4 +388,4 @@ if __name__ == "__main__":
             if send_deal_alert(deal):
                 save_sent_game(deal_key, sent_games)
                 print(f"Paylaşıldı: [{deal['platform']}] {deal['title']}")
-                break  # Kanalı boğmamak için tur başına tek fırsat
+                break
